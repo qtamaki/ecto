@@ -385,7 +385,7 @@ defmodule Ecto.Query do
 
   defmodule FromExpr do
     @moduledoc false
-    defstruct [:source, :as, :prefix, hints: []]
+    defstruct [:source, :file, :line, :as, :prefix, params: [], hints: []]
   end
 
   defmodule DynamicExpr do
@@ -405,7 +405,7 @@ defmodule Ecto.Query do
 
   defmodule SelectExpr do
     @moduledoc false
-    defstruct [:expr, :file, :line, :fields, params: [], take: %{}, subqueries: []]
+    defstruct [:expr, :file, :line, :fields, params: [], take: %{}, subqueries: [], aliases: %{}]
   end
 
   defmodule JoinExpr do
@@ -779,8 +779,8 @@ defmodule Ecto.Query do
   It can either be a keyword query or a query expression.
 
   If it is a keyword query the first argument must be
-  either an `in` expression, or a value that implements
-  the `Ecto.Queryable` protocol. If the query needs a
+  either an `in` expression, a value that implements
+  the `Ecto.Queryable` protocol, or an `Ecto.Query.API.fragment/1`. If the query needs a
   reference to the data source in any other part of the
   expression, then an `in` must be used to create a reference
   variable. The second argument should be a keyword query
@@ -791,13 +791,30 @@ defmodule Ecto.Query do
   a value that implements the `Ecto.Queryable` protocol
   and the second argument the expression.
 
-  ## Keywords example
+  ## Keywords examples
 
+      # `in` expression
       from(c in City, select: c)
 
-  ## Expressions example
+      # Ecto.Queryable
+      from(City, limit: 1)
 
+      # Fragment
+      from(f in fragment("generate_series(?, ?) as x", ^0, ^100000), select f.x)
+
+  ## Expressions examples
+
+      # Schema
       City |> select([c], c)
+
+      # Source
+      "cities" |> select([c], c)
+
+      # Source with schema
+      {"cities", Source} |> select([c], c)
+
+      # Ecto.Query
+      from(c in Cities) |> select([c], c)
 
   ## Examples
 
@@ -2260,6 +2277,65 @@ defmodule Ecto.Query do
 
   def has_named_binding?(queryable, key) do
     has_named_binding?(Ecto.Queryable.to_query(queryable), key)
+  end
+
+  @doc """
+  Applies a callback function to a query if it doesn't contain the given named binding. 
+  Otherwise, returns the original query.
+
+  The callback function must accept a queryable and return an `Ecto.Query` struct 
+  that contains the provided named binding, otherwise an error is raised. It can also 
+  accept second argument which is the atom representing the name of a binding.
+  
+  For example, one might use this function as a convenience to conditionally add a new 
+  named join to a query:
+
+      if has_named_binding?(query, :comments) do
+        query
+      else
+        join(query, :left, c in assoc(p, :comments), as: :comments)
+      end
+
+  With this function it can be simplified to:
+
+      with_named_binding(query, :comments, fn  query, binding ->
+        join(query, :left, a in assoc(p, ^binding), as: ^binding)
+      end) 
+
+  For more information on named bindings see "Named bindings" in this module doc or `has_named_binding/2`. 
+  """
+  def with_named_binding(%Ecto.Query{} = query, key, fun) do
+    if has_named_binding?(query, key) do
+      query
+    else
+      query
+      |> apply_binding_callback(fun, key)
+      |> raise_on_invalid_callback_return(key)
+    end
+  end
+
+  def with_named_binding(queryable, key, fun) do
+    queryable
+    |> Ecto.Queryable.to_query()
+    |> with_named_binding(key, fun)
+  end
+  
+  defp apply_binding_callback(query, fun, _key) when is_function(fun, 1), do: query |> fun.() 
+  defp apply_binding_callback(query, fun, key) when is_function(fun, 2), do: query |> fun.(key)
+  defp apply_binding_callback(_query, fun, _key) do
+    raise ArgumentError, "callback function for with_named_binding/3 should accept one or two arguments, got: #{inspect(fun)}"
+  end
+  
+  defp raise_on_invalid_callback_return(%Ecto.Query{} = query, key) do
+    if has_named_binding?(query, key) do
+      query
+    else
+      raise RuntimeError, "callback function for with_named_binding/3 should create a named binding for key #{inspect(key)}"
+    end
+  end
+
+  defp raise_on_invalid_callback_return(other, _key) do
+    raise RuntimeError, "callback function for with_named_binding/3 should return an Ecto.Query struct, got: #{inspect(other)}"
   end
 
   @doc """

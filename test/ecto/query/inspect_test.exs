@@ -129,6 +129,10 @@ defmodule Ecto.Query.InspectTest do
     assert i(from(x in Post, full_join: y in {"user_comments", Comment}, on: x.id == y.id)) ==
            ~s[from p0 in Inspect.Post, full_join: c1 in {"user_comments", Inspect.Comment}, on: p0.id == c1.id]
 
+    binding = :comments
+    assert i(from(x in Post, left_join: y in assoc(x, ^binding), as: ^binding)) ==
+           ~s{from p0 in Inspect.Post, left_join: c1 in assoc(p0, :comments), as: :comments}
+    
     assert i(from(x in Post, left_join: y in assoc(x, :comments))) ==
            ~s{from p0 in Inspect.Post, left_join: c1 in assoc(p0, :comments)}
 
@@ -295,14 +299,26 @@ defmodule Ecto.Query.InspectTest do
 
   test "fragments" do
     value = "foobar"
+
     assert i(from(x in Post, where: fragment("downcase(?) == ?", x.id, ^value))) ==
-           ~s{from p0 in Inspect.Post, where: fragment("downcase(?) == ?", p0.id, ^"foobar")}
+             ~s{from p0 in Inspect.Post, where: fragment("downcase(?) == ?", p0.id, ^"foobar")}
 
     assert i(from(x in Post, where: fragment(^[title: [foo: "foobar"]]))) ==
-           ~s{from p0 in Inspect.Post, where: fragment(title: [foo: "foobar"])}
+             ~s{from p0 in Inspect.Post, where: fragment(title: [foo: "foobar"])}
 
     assert i(from(x in Post, where: fragment(title: [foo: ^value]))) ==
-      ~s{from p0 in Inspect.Post, where: fragment(title: [foo: ^"foobar"])}
+             ~s{from p0 in Inspect.Post, where: fragment(title: [foo: ^"foobar"])}
+
+    assert i(from(x in fragment("SELECT ? as title", ^value))) ==
+             ~s{from f0 in fragment("SELECT ? as title", ^"foobar")}
+
+    assert i(
+             from(x in fragment("SELECT ? as title", ^value),
+               join: y in fragment("SELECT ? as title", ^value),
+               on: x.title == y.title
+             )
+           ) ==
+             ~s{from f0 in fragment("SELECT ? as title", ^"foobar"), join: f1 in fragment(\"SELECT ? as title\", ^\"foobar\"), on: f0.title == f1.title}
   end
 
   test "json_extract_path" do

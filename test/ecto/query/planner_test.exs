@@ -79,7 +79,7 @@ defmodule Ecto.Query.PlannerTest do
       field :posted, :naive_datetime
       field :visits, :integer
       field :links, {:array, CustomPermalink}
-      field :prefs, {:map, :string}
+      field :prefs, {:map, :string}, source: :preferences
       field :payload, :map, load_in_query: false
       field :status, Ecto.Enum, values: [:draft, :published, :deleted]
 
@@ -127,33 +127,42 @@ defmodule Ecto.Query.PlannerTest do
     subquery = from Comment, where: [text: ^"subquery"]
 
     query =
-      from p in Post,
-        select: {p.title, ^"select"},
+      from f in fragment("SELECT ? <>  ? as title", ^"fragment_source1", ^"fragment_source2"),
+        select: {f.title, ^"select"},
         join: c in subquery(subquery),
         on: c.text == ^"join",
+        join: p in Post,
+        on: f.title == p.title,
         left_join: d in assoc(p, :comments),
         union_all: ^union,
         windows: [foo: [partition_by: fragment("?", ^"windows")]],
-        where: p.title == ^"where",
-        group_by: p.title == ^"group_by",
-        having: p.title == ^"having",
+        where: f.title == ^"where",
+        group_by: f.title == ^"group_by",
+        having: f.title == ^"having",
         order_by: [asc: fragment("?", ^"order_by")],
         limit: ^0,
         offset: ^1
 
     {_query, cast_params, dump_params, _key} = plan(query)
+
     assert cast_params ==
-             ["select", "subquery", "join", "where", "group_by", "having", "windows"] ++
+             ["select", "fragment_source1", "fragment_source2", "subquery", "join", "where", "group_by", "having", "windows"] ++
                ["union", "order_by", 0, 1]
 
     assert dump_params ==
-             ["select", "subquery", "join", "where", "group_by", "having", "windows"] ++
+             ["select", "fragment_source1", "fragment_source2", "subquery", "join", "where", "group_by", "having", "windows"] ++
                ["union", "order_by", 0, 1]
   end
 
   test "plan: checks from" do
     assert_raise Ecto.QueryError, ~r"query must have a from expression", fn ->
       plan(%Ecto.Query{})
+    end
+  end
+
+  test "plan: fragment from cannot have preloads" do
+    assert_raise Ecto.QueryError, ~r"cannot preload associations with a fragment source", fn ->
+      plan(from f in fragment("select 1"), preload: :field)
     end
   end
 
@@ -1095,7 +1104,6 @@ defmodule Ecto.Query.PlannerTest do
     normalize(query)
   end
 
-
   test "normalize: alias in type/2" do
     query =
       from(x in Post, as: :post)
@@ -1104,6 +1112,13 @@ defmodule Ecto.Query.PlannerTest do
 
     assert inspect(query) =~
              "from p0 in Ecto.Query.PlannerTest.Post, as: :post, prefix: \"my_prefix\", select: type(p0.visits, :integer)"
+  end
+
+  test "normalize: parent_as/1 in type/2" do
+    child = from c in Comment, where: type(parent_as(:posts).id, :string) == c.text
+    query = from(Post, as: :posts, inner_lateral_join: c in subquery(child)) |> normalize()
+
+    assert inspect(query) =~ "where: type(parent_as(:posts).id, :string) == c0.text"
   end
 
   test "normalize: validate fields in left side of in expressions" do
@@ -1139,16 +1154,16 @@ defmodule Ecto.Query.PlannerTest do
     query = from(p in "posts") |> select([p], p.meta["slug"])
     normalize(query)
 
-    query = from(p  in "posts") |> select([p], p.meta["unknown_field"])
+    query = from(p in "posts") |> select([p], p.meta["unknown_field"])
     normalize(query)
 
-    query = from(p  in "posts") |> select([p], p.meta["author"]["unknown_field"])
+    query = from(p in "posts") |> select([p], p.meta["author"]["unknown_field"])
     normalize(query)
 
-    query = from(p  in "posts") |> select([p], p.metas["not_index"])
+    query = from(p in "posts") |> select([p], p.metas["not_index"])
     normalize(query)
 
-    query = from(p  in "posts") |> select([p], p.metas["not_index"]["unknown_field"])
+    query = from(p in "posts") |> select([p], p.metas["not_index"]["unknown_field"])
     normalize(query)
 
     assert_raise RuntimeError, "expected field `title` to be an embed or a map, got: `:string`", fn ->
@@ -1175,6 +1190,16 @@ defmodule Ecto.Query.PlannerTest do
       query = from(Post, []) |> select([p], p.metas["not_index"])
       normalize(query)
     end
+  end
+
+  test "normalize: json_extract_path with field having custom source" do
+    normalized_query =
+      Post
+      |> where([p], p.prefs["field"] == "value")
+      |> select([p], p.prefs["field"])
+      |> normalize()
+
+    assert inspect(normalized_query) =~ "where: p0.preferences[\"field\"] == \"value\", select: p0.preferences[\"field\"]>"
   end
 
   test "normalize: flattens and expands right side of in expressions" do
@@ -1282,16 +1307,16 @@ defmodule Ecto.Query.PlannerTest do
     assert query.select.expr ==
              {:&, [], [0]}
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0)
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0)
 
     query = from(Post, []) |> select([p], {p, p.title, "Post"}) |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
 
     query = from(Post, []) |> select([p], {p.title, p, "Post"}) |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
 
     query =
@@ -1301,7 +1326,7 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, _], {p.title, p})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            select_fields([:id, :text, :posted, :uuid, :crazy_comment, :post_id, :crazy_post_id], 1) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
   end
@@ -1363,7 +1388,7 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, c], {p, struct(c, [:id, :text])})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            select_fields([:id, :text], 1)
   end
 
@@ -1418,7 +1443,7 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, c], {p, map(c, [:id, :text])})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            select_fields([:id, :text], 1)
   end
 
@@ -1466,11 +1491,11 @@ defmodule Ecto.Query.PlannerTest do
     query = Post |> select([p], %{p | title: "foo"}) |> normalize()
     assert query.select.expr == {:%{}, [], [{:|, [], [{:&, [], [0]}, [title: "foo"]]}]}
     assert query.select.fields ==
-      select_fields([:id, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0)
+      select_fields([:id, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0)
 
     query = Post |> select([p], {%{p | title: "foo"}, p.title}) |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
 
     query =
@@ -1479,7 +1504,7 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, c], {p, %{c | text: "bar"}})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :status, :meta, :metas], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :preferences, :status, :meta, :metas], 0) ++
            select_fields([:id, :posted, :uuid, :crazy_comment, :post_id, :crazy_post_id], 1)
   end
 
@@ -1698,6 +1723,52 @@ defmodule Ecto.Query.PlannerTest do
         }
       )
       |> normalize()
+    end
+  end
+
+  describe "selected aliases" do
+    test "with group_by" do
+      # defined alias
+      from(c in Comment, group_by: selected_as(:post), select: selected_as(c.post_id, :post)) |> normalize()
+
+      # undefined alias
+      message =
+        "invalid alias: `:post`. Use `selected_as/2` to define aliases in the outer most `select` expression."
+
+      assert_raise ArgumentError, message, fn ->
+        from(c in Comment, group_by: selected_as(:post)) |> normalize()
+      end
+    end
+
+    test "with order_by" do
+      # defined alias
+      from(c in Comment, order_by: selected_as(:post), select: selected_as(c.post_id, :post)) |> normalize()
+
+      # undefined alias
+      message =
+        "invalid alias: `:post`. Use `selected_as/2` to define aliases in the outer most `select` expression."
+
+      assert_raise ArgumentError, message, fn ->
+        from(c in Comment, order_by: selected_as(:post)) |> normalize()
+      end
+    end
+
+    test "raises if selected_as/2 is used in a subquery" do
+      message = ~r"`selected_as/2` can only be used in the outer most `select` expression."
+
+      assert_raise Ecto.SubQueryError, message, fn ->
+        query = "schema" |> select([s], %{x: selected_as(s.x, :integer)})
+        from(q in subquery(query)) |> normalize()
+      end
+    end
+
+    test "raises if selected_as/2 is used in a cte" do
+      message = ~r"`selected_as/2` can only be used in the outer most `select` expression."
+
+      assert_raise ArgumentError, message, fn ->
+        query = "schema" |> select([s], %{x: selected_as(s.x, :integer)})
+        Post |> with_cte("cte", as: ^query) |> normalize()
+      end
     end
   end
 end
